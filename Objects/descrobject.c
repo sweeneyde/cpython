@@ -6,6 +6,8 @@
 #include "pycore_tupleobject.h"
 #include "structmember.h" /* Why is this not included in Python.h? */
 
+_Py_IDENTIFIER(getattr);
+
 /*[clinic input]
 class mappingproxy "mappingproxyobject *" "&PyDictProxy_Type"
 class property "propertyobject *" "&PyProperty_Type"
@@ -82,7 +84,7 @@ descr_check(PyDescrObject *descr, PyObject *obj, PyObject **pres)
                      "doesn't apply to a '%.100s' object",
                      descr_name((PyDescrObject *)descr), "?",
                      descr->d_type->tp_name,
-                     obj->ob_type->tp_name);
+                     Py_TYPE(obj)->tp_name);
         *pres = NULL;
         return 1;
     }
@@ -95,7 +97,7 @@ classmethod_get(PyMethodDescrObject *descr, PyObject *obj, PyObject *type)
     /* Ensure a valid type.  Class methods ignore obj. */
     if (type == NULL) {
         if (obj != NULL)
-            type = (PyObject *)obj->ob_type;
+            type = (PyObject *)Py_TYPE(obj);
         else {
             /* Wot - no type?! */
             PyErr_Format(PyExc_TypeError,
@@ -112,7 +114,7 @@ classmethod_get(PyMethodDescrObject *descr, PyObject *obj, PyObject *type)
                      "needs a type, not a '%.100s' as arg 2",
                      descr_name((PyDescrObject *)descr), "?",
                      PyDescr_TYPE(descr)->tp_name,
-                     type->ob_type->tp_name);
+                     Py_TYPE(type)->tp_name);
         return NULL;
     }
     if (!PyType_IsSubtype((PyTypeObject *)type, PyDescr_TYPE(descr))) {
@@ -192,7 +194,7 @@ descr_setcheck(PyDescrObject *descr, PyObject *obj, PyObject *value,
                      "doesn't apply to a '%.100s' object",
                      descr_name(descr), "?",
                      descr->d_type->tp_name,
-                     obj->ob_type->tp_name);
+                     Py_TYPE(obj)->tp_name);
         *pres = -1;
         return 1;
     }
@@ -452,7 +454,7 @@ classmethoddescr_call(PyMethodDescrObject *descr, PyObject *args,
     if (bound == NULL) {
         return NULL;
     }
-    PyObject *res = _PyObject_FastCallDict(bound, _PyTuple_ITEMS(args)+1,
+    PyObject *res = PyObject_VectorcallDict(bound, _PyTuple_ITEMS(args)+1,
                                            argc-1, kwds);
     Py_DECREF(bound);
     return res;
@@ -504,7 +506,7 @@ wrapperdescr_call(PyWrapperDescrObject *descr, PyObject *args, PyObject *kwds)
                      "but received a '%.100s'",
                      descr_name((PyDescrObject *)descr), "?",
                      PyDescr_TYPE(descr)->tp_name,
-                     self->ob_type->tp_name);
+                     Py_TYPE(self)->tp_name);
         return NULL;
     }
 
@@ -571,7 +573,6 @@ descr_get_qualname(PyDescrObject *descr, void *Py_UNUSED(ignored))
 static PyObject *
 descr_reduce(PyDescrObject *descr, PyObject *Py_UNUSED(ignored))
 {
-    _Py_IDENTIFIER(getattr);
     return Py_BuildValue("N(OO)", _PyEval_GetBuiltinId(&PyId_getattr),
                          PyDescr_TYPE(descr), PyDescr_NAME(descr));
 }
@@ -672,7 +673,7 @@ PyTypeObject PyMethodDescr_Type = {
     0,                                          /* tp_setattro */
     0,                                          /* tp_as_buffer */
     Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC |
-    _Py_TPFLAGS_HAVE_VECTORCALL |
+    Py_TPFLAGS_HAVE_VECTORCALL |
     Py_TPFLAGS_METHOD_DESCRIPTOR,               /* tp_flags */
     0,                                          /* tp_doc */
     descr_traverse,                             /* tp_traverse */
@@ -981,6 +982,30 @@ static PyMappingMethods mappingproxy_as_mapping = {
     0,                                          /* mp_ass_subscript */
 };
 
+static PyObject *
+mappingproxy_or(PyObject *left, PyObject *right)
+{
+    if (PyObject_TypeCheck(left, &PyDictProxy_Type)) {
+        left = ((mappingproxyobject*)left)->mapping;
+    }
+    if (PyObject_TypeCheck(right, &PyDictProxy_Type)) {
+        right = ((mappingproxyobject*)right)->mapping;
+    }
+    return PyNumber_Or(left, right);
+}
+
+static PyObject *
+mappingproxy_ior(PyObject *self, PyObject *Py_UNUSED(other))
+{
+    return PyErr_Format(PyExc_TypeError,
+        "'|=' is not supported by %s; use '|' instead", Py_TYPE(self)->tp_name);
+}
+
+static PyNumberMethods mappingproxy_as_number = {
+    .nb_or = mappingproxy_or,
+    .nb_inplace_or = mappingproxy_ior,
+};
+
 static int
 mappingproxy_contains(mappingproxyobject *pp, PyObject *key)
 {
@@ -1177,7 +1202,7 @@ typedef struct {
     PyObject *self;
 } wrapperobject;
 
-#define Wrapper_Check(v) (Py_TYPE(v) == &_PyMethodWrapper_Type)
+#define Wrapper_Check(v) Py_IS_TYPE(v, &_PyMethodWrapper_Type)
 
 static void
 wrapper_dealloc(wrapperobject *wp)
@@ -1233,14 +1258,13 @@ wrapper_repr(wrapperobject *wp)
 {
     return PyUnicode_FromFormat("<method-wrapper '%s' of %s object at %p>",
                                wp->descr->d_base->name,
-                               wp->self->ob_type->tp_name,
+                               Py_TYPE(wp->self)->tp_name,
                                wp->self);
 }
 
 static PyObject *
 wrapper_reduce(wrapperobject *wp, PyObject *Py_UNUSED(ignored))
 {
-    _Py_IDENTIFIER(getattr);
     return Py_BuildValue("N(OO)", _PyEval_GetBuiltinId(&PyId_getattr),
                          wp->self, PyDescr_NAME(wp->descr));
 }
@@ -1476,7 +1500,7 @@ property_dealloc(PyObject *self)
     Py_XDECREF(gs->prop_set);
     Py_XDECREF(gs->prop_del);
     Py_XDECREF(gs->prop_doc);
-    self->ob_type->tp_free(self);
+    Py_TYPE(self)->tp_free(self);
 }
 
 static PyObject *
@@ -1493,7 +1517,7 @@ property_descr_get(PyObject *self, PyObject *obj, PyObject *type)
         return NULL;
     }
 
-    return _PyObject_CallOneArg(gs->prop_get, obj);
+    return PyObject_CallOneArg(gs->prop_get, obj);
 }
 
 static int
@@ -1514,7 +1538,7 @@ property_descr_set(PyObject *self, PyObject *obj, PyObject *value)
         return -1;
     }
     if (value == NULL)
-        res = _PyObject_CallOneArg(func, obj);
+        res = PyObject_CallOneArg(func, obj);
     else
         res = PyObject_CallFunctionObjArgs(func, obj, value, NULL);
     if (res == NULL)
@@ -1628,7 +1652,7 @@ property_init_impl(propertyobject *self, PyObject *fget, PyObject *fset,
         if (rc <= 0) {
             return rc;
         }
-        if (Py_TYPE(self) == &PyProperty_Type) {
+        if (Py_IS_TYPE(self, &PyProperty_Type)) {
             Py_XSETREF(self->prop_doc, get_doc);
         }
         else {
@@ -1717,7 +1741,7 @@ PyTypeObject PyDictProxy_Type = {
     0,                                          /* tp_setattr */
     0,                                          /* tp_as_async */
     (reprfunc)mappingproxy_repr,                /* tp_repr */
-    0,                                          /* tp_as_number */
+    &mappingproxy_as_number,                    /* tp_as_number */
     &mappingproxy_as_sequence,                  /* tp_as_sequence */
     &mappingproxy_as_mapping,                   /* tp_as_mapping */
     0,                                          /* tp_hash */

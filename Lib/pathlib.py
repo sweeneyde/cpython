@@ -253,9 +253,7 @@ class _WindowsFlavour(_Flavour):
             return 'file:' + urlquote_from_bytes(path.as_posix().encode('utf-8'))
 
     def gethomedir(self, username):
-        if 'HOME' in os.environ:
-            userhome = os.environ['HOME']
-        elif 'USERPROFILE' in os.environ:
+        if 'USERPROFILE' in os.environ:
             userhome = os.environ['USERPROFILE']
         elif 'HOMEPATH' in os.environ:
             try:
@@ -418,7 +416,12 @@ class _NormalAccessor(_Accessor):
 
     unlink = os.unlink
 
-    link_to = os.link
+    if hasattr(os, "link"):
+        link_to = os.link
+    else:
+        @staticmethod
+        def link_to(self, target):
+            raise NotImplementedError("os.link() not available on this system")
 
     rmdir = os.rmdir
 
@@ -526,21 +529,24 @@ class _WildcardSelector(_Selector):
         try:
             entries = list(scandir(parent_path))
             for entry in entries:
-                entry_is_dir = False
-                try:
-                    entry_is_dir = entry.is_dir()
-                except OSError as e:
-                    if not _ignore_error(e):
-                        raise
-                if not self.dironly or entry_is_dir:
-                    name = entry.name
-                    if self.match(name):
-                        path = parent_path._make_child_relpath(name)
-                        for p in self.successor._select_from(path, is_dir, exists, scandir):
-                            yield p
+                if self.dironly:
+                    try:
+                        # "entry.is_dir()" can raise PermissionError
+                        # in some cases (see bpo-38894), which is not
+                        # among the errors ignored by _ignore_error()
+                        if not entry.is_dir():
+                            continue
+                    except OSError as e:
+                        if not _ignore_error(e):
+                            raise
+                        continue
+                name = entry.name
+                if self.match(name):
+                    path = parent_path._make_child_relpath(name)
+                    for p in self.successor._select_from(path, is_dir, exists, scandir):
+                        yield p
         except PermissionError:
             return
-
 
 
 class _RecursiveWildcardSelector(_Selector):
@@ -776,6 +782,9 @@ class PurePath(object):
         if not isinstance(other, PurePath) or self._flavour is not other._flavour:
             return NotImplemented
         return self._cparts >= other._cparts
+
+    def __class_getitem__(cls, type):
+        return cls
 
     drive = property(attrgetter('_drv'),
                      doc="""The drive prefix (letter or UNC path), if any.""")
@@ -1128,6 +1137,7 @@ class Path(PurePath):
         """Iterate over this subtree and yield all existing files (of any
         kind, including directories) matching the given relative pattern.
         """
+        sys.audit("pathlib.Path.glob", self, pattern)
         if not pattern:
             raise ValueError("Unacceptable pattern: {!r}".format(pattern))
         drv, root, pattern_parts = self._flavour.parse_parts((pattern,))
@@ -1142,6 +1152,7 @@ class Path(PurePath):
         directories) matching the given relative pattern, anywhere in
         this subtree.
         """
+        sys.audit("pathlib.Path.rglob", self, pattern)
         drv, root, pattern_parts = self._flavour.parse_parts((pattern,))
         if drv or root:
             raise NotImplementedError("Non-relative patterns are unsupported")
