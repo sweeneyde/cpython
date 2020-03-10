@@ -12773,12 +12773,6 @@ static PyObject *
 unicode_cutprefix_impl(PyObject *self, PyObject *prefix)
 /*[clinic end generated code: output=885902e3c7f5fae0 input=52efc288b6160337]*/
 {
-    if (!PyUnicode_Check(prefix)) {
-        PyErr_Format(PyExc_TypeError,
-            "cutprefix arg must be str, not %.100s",
-            Py_TYPE(prefix)->tp_name);
-        return NULL;
-    }
     int match = tailmatch(self, prefix, 0, PY_SSIZE_T_MAX, -1);
     if (match == -1) {
         return NULL;
@@ -12806,12 +12800,6 @@ static PyObject *
 unicode_cutsuffix_impl(PyObject *self, PyObject *suffix)
 /*[clinic end generated code: output=5e5babcd284e6e6e input=7cb8ec5dd6849be0]*/
 {
-    if (!PyUnicode_Check(suffix)) {
-        PyErr_Format(PyExc_TypeError,
-            "cutsuffix arg must be str, not %.100s",
-            Py_TYPE(suffix)->tp_name);
-        return NULL;
-    }
     int match = tailmatch(self, suffix, 0, PY_SSIZE_T_MAX, +1);
     if (match == -1) {
         return NULL;
