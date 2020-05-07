@@ -805,9 +805,7 @@ top:
             }
             if (ep->me_hash == hash) {
                 PyObject *startkey = ep->me_key;
-                Py_INCREF(startkey);
                 int cmp = PyObject_RichCompareBool(startkey, key, Py_EQ);
-                Py_DECREF(startkey);
                 if (cmp < 0) {
                     *value_addr = NULL;
                     return DKIX_ERROR;
@@ -4592,9 +4590,7 @@ dictitems_contains(_PyDictViewObject *dv, PyObject *obj)
             return -1;
         return 0;
     }
-    Py_INCREF(found);
     result = PyObject_RichCompareBool(found, value, Py_EQ);
-    Py_DECREF(found);
     return result;
 }
 

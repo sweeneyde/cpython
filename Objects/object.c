@@ -651,59 +651,132 @@ int _Py_SwappedOp[] = {Py_GT, Py_GE, Py_EQ, Py_NE, Py_LT, Py_LE};
 
 static const char * const opstrings[] = {"<", "<=", "==", "!=", ">", ">="};
 
+/* Whitelist for types with comparitors that never do anything heinous,
+   e.g., destroying data and then returning NotImplemented */
+#define NUM_SAFE_TYPES 6
+static PyTypeObject *safe_types[NUM_SAFE_TYPES] = {&PyLong_Type,
+                                                   &PyFloat_Type,
+                                                   &PyUnicode_Type,
+                                                   &PyBytes_Type};
+
+static inline int
+is_safe_compare_type(PyTypeObject *type) {
+
+    for (int i = 0; i < NUM_SAFE_TYPES; i++) {
+        if (safe_types[i] == type) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+#undef NUM_SAFE_TYPES
+
 /* Perform a rich comparison, raising TypeError when the requested comparison
    operator is not supported. */
 static PyObject *
-do_richcompare(PyThreadState *tstate, PyObject *v, PyObject *w, int op)
+do_richcompare(PyThreadState *tstate, PyObject *left, PyObject *right, int op)
 {
     richcmpfunc f;
     PyObject *res;
     int checked_reverse_op = 0;
+    int prepared = 0;
 
-    if (!Py_IS_TYPE(v, Py_TYPE(w)) &&
-        PyType_IsSubtype(Py_TYPE(w), Py_TYPE(v)) &&
-        (f = Py_TYPE(w)->tp_richcompare) != NULL) {
+    PyTypeObject *left_type = Py_TYPE(left);
+    PyTypeObject *right_type = Py_TYPE(right);
+
+/* If the types are not safe, do increfs and a recursion check. */
+#define PREPARE_FOR_UNSAFE do {                                 \
+        if (_Py_EnterRecursiveCall(tstate, " in comparison")) { \
+            return NULL;                                        \
+        }                                                       \
+        Py_INCREF(left);                                        \
+        Py_INCREF(right);                                       \
+        prepared = 1;                                           \
+    } while (0)
+
+    /* When type(right) is a /proper/ subtype of type(left)
+       and has a comparison defined, use it. */
+    if (left_type != right_type &&
+        PyType_IsSubtype(right_type, left_type) &&
+        (f = right_type->tp_richcompare) != NULL
+    ){
+        if (!is_safe_compare_type(right_type)) {
+            PREPARE_FOR_UNSAFE;
+        }
         checked_reverse_op = 1;
-        res = (*f)(w, v, _Py_SwappedOp[op]);
-        if (res != Py_NotImplemented)
-            return res;
+        res = (*f)(right, left, _Py_SwappedOp[op]);
+        if (res != Py_NotImplemented) {
+            goto end;
+        }
+        if (prepared) {
+            left_type = Py_TYPE(left);
+            right_type = Py_TYPE(right);
+        }
         Py_DECREF(res);
     }
-    if ((f = Py_TYPE(v)->tp_richcompare) != NULL) {
-        res = (*f)(v, w, op);
-        if (res != Py_NotImplemented)
-            return res;
+    /* In most cases, use type(left)'s comparison if it exists. */
+    if ((f = left_type->tp_richcompare) != NULL) {
+        if (!prepared && !is_safe_compare_type(left_type)) {
+            PREPARE_FOR_UNSAFE;
+        }
+        res = (*f)(left, right, op);
+        if (res != Py_NotImplemented) {
+            goto end;
+        }
+        if (prepared) {
+            left_type = Py_TYPE(left);
+            right_type = Py_TYPE(right);
+        }
         Py_DECREF(res);
     }
-    if (!checked_reverse_op && (f = Py_TYPE(w)->tp_richcompare) != NULL) {
-        res = (*f)(w, v, _Py_SwappedOp[op]);
-        if (res != Py_NotImplemented)
-            return res;
+    /* If the type(left)'s comparison doesn't exist, try the right
+       (unless we've already tried it). */
+    if (!checked_reverse_op && (f = right_type->tp_richcompare) != NULL) {
+        if (!prepared && !is_safe_compare_type(right_type)) {
+            PREPARE_FOR_UNSAFE;
+        }
+        res = (*f)(right, left, _Py_SwappedOp[op]);
+        if (res != Py_NotImplemented) {
+            goto end;
+        }
+        if (prepared) {
+            left_type = Py_TYPE(left);
+            right_type = Py_TYPE(right);
+        }
         Py_DECREF(res);
     }
     /* If neither object implements it, provide a sensible default
        for == and !=, but raise an exception for ordering. */
     switch (op) {
     case Py_EQ:
-        res = (v == w) ? Py_True : Py_False;
+        res = (left == right) ? Py_True : Py_False;
         break;
     case Py_NE:
-        res = (v != w) ? Py_True : Py_False;
+        res = (left != right) ? Py_True : Py_False;
         break;
     default:
         _PyErr_Format(tstate, PyExc_TypeError,
                       "'%s' not supported between instances of '%.100s' and '%.100s'",
                       opstrings[op],
-                      Py_TYPE(v)->tp_name,
-                      Py_TYPE(w)->tp_name);
-        return NULL;
+                      left_type->tp_name,
+                      right_type->tp_name);
+        res = NULL;
+        goto end;
     }
     Py_INCREF(res);
+end:
+    if (prepared) {
+        Py_DECREF(left);
+        Py_DECREF(right);
+        _Py_LeaveRecursiveCall(tstate);
+    }
     return res;
+#undef PREPARE_FOR_UNSAFE
 }
 
 /* Perform a rich comparison with object result.  This wraps do_richcompare()
-   with a check for NULL arguments and a recursion check. */
+   with a check for NULL arguments. */
 
 PyObject *
 PyObject_RichCompare(PyObject *v, PyObject *w, int op)
@@ -717,12 +790,7 @@ PyObject_RichCompare(PyObject *v, PyObject *w, int op)
         }
         return NULL;
     }
-    if (_Py_EnterRecursiveCall(tstate, " in comparison")) {
-        return NULL;
-    }
-    PyObject *res = do_richcompare(tstate, v, w, op);
-    _Py_LeaveRecursiveCall(tstate);
-    return res;
+    return do_richcompare(tstate, v, w, op);
 }
 
 /* Perform a rich comparison with integer result.  This wraps

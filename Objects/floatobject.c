@@ -360,6 +360,9 @@ float_richcompare(PyObject *v, PyObject *w, int op)
     double i, j;
     int r = 0;
 
+    if (!PyFloat_Check(v)) {
+        printf("aaaaaa\n");
+    }
     assert(PyFloat_Check(v));
     i = PyFloat_AS_DOUBLE(v);
 

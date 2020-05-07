@@ -421,9 +421,7 @@ list_contains(PyListObject *a, PyObject *el)
 
     for (i = 0, cmp = 0 ; cmp == 0 && i < Py_SIZE(a); ++i) {
         item = PyList_GET_ITEM(a, i);
-        Py_INCREF(item);
         cmp = PyObject_RichCompareBool(item, el, Py_EQ);
-        Py_DECREF(item);
     }
     return cmp;
 }
@@ -2529,9 +2527,7 @@ list_index_impl(PyListObject *self, PyObject *value, Py_ssize_t start,
     }
     for (i = start; i < stop && i < Py_SIZE(self); i++) {
         PyObject *obj = self->ob_item[i];
-        Py_INCREF(obj);
         int cmp = PyObject_RichCompareBool(obj, value, Py_EQ);
-        Py_DECREF(obj);
         if (cmp > 0)
             return PyLong_FromSsize_t(i);
         else if (cmp < 0)
@@ -2563,9 +2559,7 @@ list_count(PyListObject *self, PyObject *value)
            count++;
            continue;
         }
-        Py_INCREF(obj);
         int cmp = PyObject_RichCompareBool(obj, value, Py_EQ);
-        Py_DECREF(obj);
         if (cmp > 0)
             count++;
         else if (cmp < 0)
@@ -2593,9 +2587,7 @@ list_remove(PyListObject *self, PyObject *value)
 
     for (i = 0; i < Py_SIZE(self); i++) {
         PyObject *obj = self->ob_item[i];
-        Py_INCREF(obj);
         int cmp = PyObject_RichCompareBool(obj, value, Py_EQ);
-        Py_DECREF(obj);
         if (cmp > 0) {
             if (list_ass_slice(self, i, i+1,
                                (PyObject *)NULL) == 0)
@@ -2647,11 +2639,7 @@ list_richcompare(PyObject *v, PyObject *w, int op)
             continue;
         }
 
-        Py_INCREF(vitem);
-        Py_INCREF(witem);
         int k = PyObject_RichCompareBool(vitem, witem, Py_EQ);
-        Py_DECREF(vitem);
-        Py_DECREF(witem);
         if (k < 0)
             return NULL;
         if (!k)
