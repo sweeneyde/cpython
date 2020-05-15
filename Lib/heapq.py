@@ -329,67 +329,214 @@ def merge(*iterables, key=None, reverse=False):
 
     '''
 
-    h = []
-    h_append = h.append
-
-    if reverse:
-        _heapify = _heapify_max
-        _heappop = _heappop_max
-        _heapreplace = _heapreplace_max
-        direction = -1
-    else:
-        _heapify = heapify
-        _heappop = heappop
-        _heapreplace = heapreplace
-        direction = 1
+    iters = [iter(x) for x in iterables]
+    n = len(iters)
+    if n == 0:
+        return
+    if n == 1:
+        yield from iters[0]
+        return
+    min_sentinel = object()
+    sentinel = object()
+    tree = [min_sentinel] * (n-1)
+    _StopIteration = StopIteration
+    _next = next
 
     if key is None:
-        for order, it in enumerate(map(iter, iterables)):
-            try:
-                next = it.__next__
-                h_append([next(), order * direction, next])
-            except StopIteration:
-                pass
-        _heapify(h)
-        while len(h) > 1:
-            try:
-                while True:
-                    value, order, next = s = h[0]
-                    yield value
-                    s[0] = next()           # raises StopIteration when exhausted
-                    _heapreplace(h, s)      # restore heap condition
-            except StopIteration:
-                _heappop(h)                 # remove empty iterator
-        if h:
-            # fast case when only a single iterator remains
-            value, order, next = h[0]
-            yield value
-            yield from next.__self__
-        return
+        if reverse:
 
-    for order, it in enumerate(map(iter, iterables)):
-        try:
-            next = it.__next__
-            value = next()
-            h_append([key(value), order * direction, value, next])
-        except StopIteration:
-            pass
-    _heapify(h)
-    while len(h) > 1:
-        try:
+            ## REVERSE ##
+
+            for iter_index, it in enumerate(iters):
+                try:
+                    held_node = (_next(it), -iter_index)
+                except _StopIteration:
+                    held_node = sentinel
+                tree_index = (iter_index + n - 2) // 2
+                while True:
+                    traverse = tree[tree_index]
+                    if held_node is sentinel \
+                            or traverse is min_sentinel \
+                            or (held_node is not min_sentinel
+                                and traverse is not sentinel
+                                and held_node < traverse):
+                        tree[tree_index] = held_node
+                        held_node = traverse
+                    if tree_index == 0:
+                        break
+                    tree_index = (tree_index - 1) // 2
+                assert held_node is min_sentinel or iter_index == n - 1
+
             while True:
-                key_value, order, value, next = s = h[0]
-                yield value
-                value = next()
-                s[0] = key(value)
-                s[2] = value
-                _heapreplace(h, s)
-        except StopIteration:
-            _heappop(h)
-    if h:
-        key_value, order, value, next = h[0]
-        yield value
-        yield from next.__self__
+                if held_node is sentinel:
+                    return
+                champion, neg_iter_index = held_node
+                iter_index = -neg_iter_index
+                yield champion
+                try:
+                    held_node = (_next(iters[iter_index]), neg_iter_index)
+                except _StopIteration:
+                    held_node = sentinel
+                tree_index = (iter_index + n - 2) // 2
+                while True:
+                    traverse = tree[tree_index]
+                    if held_node is sentinel \
+                            or (traverse is not sentinel
+                                and held_node < traverse):
+                        tree[tree_index] = held_node
+                        held_node = traverse
+                    if tree_index == 0:
+                        break
+                    tree_index = (tree_index - 1) // 2
+        else:
+
+            ## FORWARD ##
+
+            for iter_index, it in enumerate(iters):
+                try:
+                    held_node = (_next(it), iter_index)
+                except _StopIteration:
+                    held_node = sentinel
+                tree_index = (iter_index + n - 2) // 2
+                while True:
+                    traverse = tree[tree_index]
+                    if held_node is sentinel \
+                            or traverse is min_sentinel \
+                            or (held_node is not min_sentinel
+                                and traverse is not sentinel
+                                and traverse < held_node):
+                        tree[tree_index] = held_node
+                        held_node = traverse
+                    if tree_index == 0:
+                        break
+                    tree_index = (tree_index - 1) // 2
+                assert held_node is min_sentinel or iter_index == n - 1
+
+            while True:
+                if held_node is sentinel:
+                    return
+                champion, iter_index = held_node
+                yield champion
+                try:
+                    held_node = (_next(iters[iter_index]), iter_index)
+                except _StopIteration:
+                    held_node = sentinel
+                tree_index = (iter_index + n - 2) // 2
+                while True:
+                    traverse = tree[tree_index]
+                    if held_node is sentinel \
+                            or (traverse is not sentinel
+                                and traverse < held_node):
+                        tree[tree_index] = held_node
+                        held_node = traverse
+                    if tree_index == 0:
+                        break
+                    tree_index = (tree_index - 1) // 2
+    else:
+        if reverse:
+
+            ## REVERSE KEY ##
+
+            for iter_index, it in enumerate(iters):
+                try:
+                    val = _next(it)
+                except _StopIteration:
+                    held_node = sentinel
+                else:
+                    held_node = (key(val), -iter_index, val)
+
+                tree_index = (iter_index + n - 2) // 2
+                while True:
+                    traverse = tree[tree_index]
+                    if held_node is sentinel \
+                            or traverse is min_sentinel \
+                            or (held_node is not min_sentinel
+                                and traverse is not sentinel
+                                and held_node < traverse):
+                        tree[tree_index] = held_node
+                        held_node = traverse
+                    if tree_index == 0:
+                        break
+                    tree_index = (tree_index - 1) // 2
+                assert held_node is min_sentinel or iter_index == n - 1
+
+            while True:
+                if held_node is sentinel:
+                    return
+                k, neg_iter_index, champion = held_node
+                iter_index = -neg_iter_index
+                yield champion
+
+                try:
+                    val = _next(iters[iter_index])
+                except _StopIteration:
+                    held_node = sentinel
+                else:
+                    held_node = (key(val), neg_iter_index, val)
+
+                tree_index = (iter_index + n - 2) // 2
+                while True:
+                    traverse = tree[tree_index]
+                    if held_node is sentinel \
+                            or (traverse is not sentinel
+                                and held_node < traverse):
+                        tree[tree_index] = held_node
+                        held_node = traverse
+                    if tree_index == 0:
+                        break
+                    tree_index = (tree_index - 1) // 2
+
+        else:
+
+            ## FORWARD KEY ##
+
+            for iter_index, it in enumerate(iters):
+                try:
+                    val = _next(it)
+                except _StopIteration:
+                    held_node = sentinel
+                else:
+                    held_node = (key(val), iter_index, val)
+
+                tree_index = (iter_index + n - 2) // 2
+                while True:
+                    traverse = tree[tree_index]
+                    if held_node is sentinel \
+                            or traverse is min_sentinel \
+                            or (held_node is not min_sentinel
+                                and traverse is not sentinel
+                                and traverse < held_node):
+                        tree[tree_index] = held_node
+                        held_node = traverse
+                    if tree_index == 0:
+                        break
+                    tree_index = (tree_index - 1) // 2
+                assert held_node is min_sentinel or iter_index == n - 1
+
+            while True:
+                if held_node is sentinel:
+                    return
+                k, iter_index, champion = held_node
+                yield champion
+
+                try:
+                    val = _next(iters[iter_index])
+                except _StopIteration:
+                    held_node = sentinel
+                else:
+                    held_node = (key(val), iter_index, val)
+
+                tree_index = (iter_index + n - 2) // 2
+                while True:
+                    traverse = tree[tree_index]
+                    if held_node is sentinel \
+                            or (traverse is not sentinel
+                                and traverse < held_node):
+                        tree[tree_index] = held_node
+                        held_node = traverse
+                    if tree_index == 0:
+                        break
+                    tree_index = (tree_index - 1) // 2
 
 
 # Algorithm notes for nlargest() and nsmallest()

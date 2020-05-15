@@ -555,6 +555,514 @@ _heapq__heapify_max(PyObject *module, PyObject *heap)
     return heapify_internal(heap, siftup_max);
 }
 
+/* merge object *************************************************************/
+
+typedef struct node {
+    PyObject *key;
+    PyObject *value;
+    Py_ssize_t source_index;
+} merge_node;
+
+typedef struct mergeobject{
+    PyObject_HEAD
+    Py_ssize_t next_index;
+    PyObject **iterators;   /* fixed-size array */
+    Py_ssize_t num_iters;
+    PyObject *keyfunc;      /* called to compare items */
+    merge_node *tree;       /* tree of compared items stored as an array */
+    PyObject *first_sentinel;
+    PyObject *last_sentinel;
+    int reverse;
+    int status; /* Enum: 0=not yet heapified; 1=in progress; 2=finished */
+} mergeobject;
+
+static PyTypeObject merge_type;
+
+static void reprint(PyObject *obj) {
+    PyObject_Print(obj, stdout, 0);
+}
+
+/* Is a before b? */
+static int
+node_less_than(mergeobject *mo, merge_node *node_a, merge_node *node_b)
+{
+    PyObject *a, *b;
+    int cmp;
+
+    if (mo->keyfunc) {
+        a = node_a->key;
+        b = node_b->key;
+    } else {
+        assert(node_a->key == NULL);
+        assert(node_b->key == NULL);
+        a = node_a->value;
+        b = node_b->value;
+    }
+
+    assert(a != NULL);
+    assert(b != NULL);
+
+/*    printf("Comparing ");
+    reprint(a);
+    printf(" to ");
+    reprint(b);
+    printf("..."); */
+
+    if (a == mo->first_sentinel || b == mo->last_sentinel) {
+        // reprint(a);
+        // printf("wins! \n");
+        return 1;
+    }
+    if (a == mo->last_sentinel || b == mo->first_sentinel) {
+        // reprint(b);
+        // printf("wins! \n");
+        return 0;
+    }
+
+    if (!mo->reverse) {
+        if (node_a->source_index < node_b->source_index) {
+            cmp = PyObject_RichCompareBool(b, a, Py_LT);
+            if (cmp < 0) {
+                return -1;
+            }
+            // reprint((!cmp) ? a : b); printf("wins! \n");
+            return !cmp;
+        }
+        else {
+            cmp = PyObject_RichCompareBool(a, b, Py_LT);
+            if (cmp < 0) {
+                return -1;
+            }
+            // reprint((cmp) ? a : b); printf("wins! \n");
+            return cmp;
+        }
+    }
+    else {
+        if (node_a->source_index < node_b->source_index) {
+            cmp = PyObject_RichCompareBool(a, b, Py_LT);
+            if (cmp < 0) {
+                return -1;
+            }
+            // reprint((!cmp) ? a : b); printf("wins! \n");
+            return !cmp;
+        }
+        else {
+            cmp = PyObject_RichCompareBool(b, a, Py_LT);
+            if (cmp < 0) {
+                return -1;
+            }
+            // reprint((cmp) ? a : b); printf("wins! \n");
+            return cmp;
+        }
+    }
+}
+
+static int
+init_node(mergeobject *mo, Py_ssize_t iter_index, merge_node *holding)
+{
+    PyObject *it = mo->iterators[iter_index];
+
+    holding->source_index = iter_index;
+    holding->key = NULL;
+    holding->value = NULL;
+
+    if (it == NULL) {
+        if (mo->keyfunc) {
+            holding->value = mo->last_sentinel;
+            Py_INCREF(mo->last_sentinel);
+            holding->key = mo->last_sentinel;
+            Py_INCREF(mo->last_sentinel);
+        }
+        else {
+            holding->value = mo->last_sentinel;
+            Py_INCREF(mo->last_sentinel);
+            holding->key = NULL;
+        }
+        return 0;
+    }
+    
+    assert(PyIter_Check(it));
+    PyObject *new = PyIter_Next(it);
+
+    if (new == NULL) {
+        mo->iterators[iter_index] = NULL;
+        Py_DECREF(it);
+        if (PyErr_Occurred()) {
+            goto error;
+        }
+        if (mo->keyfunc) {
+            holding->value = mo->last_sentinel;
+            Py_INCREF(mo->last_sentinel);
+            holding->key = mo->last_sentinel;
+            Py_INCREF(mo->last_sentinel);
+        }
+        else {
+            holding->value = mo->last_sentinel;
+            Py_INCREF(mo->last_sentinel);
+            holding->key = NULL;
+        }
+        return 0;
+    }
+
+    holding->value = new;
+
+    if (mo->keyfunc) {
+        holding->key = _PyObject_CallOneArg(mo->keyfunc, new);
+        if (holding->key == NULL) {
+            goto error;
+        }
+    }
+    else {
+        holding->key = NULL;
+    }
+
+    return 0;
+
+error:
+    Py_CLEAR(holding->key);
+    Py_CLEAR(holding->value);
+    return -1;
+}
+
+
+static int
+replay_games(mergeobject *mo, Py_ssize_t iter_index, merge_node *holding) {
+    Py_ssize_t n = mo->num_iters;
+    merge_node *traverse;
+    merge_node temp;
+    merge_node *tree = mo->tree;
+    Py_ssize_t tree_index;
+    int res, cmp;
+
+    res = init_node(mo, iter_index, holding);
+    if (res < 0) {
+        return -1;
+    }
+
+    for (tree_index = (iter_index + n) / 2 - 1;
+         tree_index >= 0;
+         tree_index = (tree_index + 1) / 2 - 1
+    ) {
+        traverse = &tree[tree_index];
+        // printf("holding: ");
+        // reprint(holding->value);
+        // printf(", traverse: ");
+        // reprint(traverse->value);
+        // printf("...\n");
+        cmp = node_less_than(mo, holding, traverse);
+        if (cmp < 0) {
+            Py_CLEAR(holding->key);
+            Py_CLEAR(holding->value);
+            return -1;
+        }
+        /* if holding is not better than traverse... */
+        if (!cmp) {
+            temp = tree[tree_index];
+            tree[tree_index] = *holding;
+            *holding = temp;
+        }
+        // printf("now holding: ");
+        // reprint(holding->value);
+        // printf("\n");
+    }
+    return 0;
+}
+
+static PyObject *
+merge_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    PyObject *keyfunc = NULL;
+    int reverse = 0;
+    mergeobject *mo;
+    PyObject **iterators = NULL;
+    merge_node *tree = NULL;
+    Py_ssize_t num_iters, i;
+    PyObject *first_sentinel = NULL, *last_sentinel = NULL;
+
+    if (kwds != NULL) {
+        char *kwlist[] = {"key", "reverse", 0};
+        PyObject *tmpargs = PyTuple_New(0);
+        if (tmpargs == NULL) {
+            return NULL;
+        }
+        if (!PyArg_ParseTupleAndKeywords(tmpargs, kwds, "|Op:merge",
+                                         kwlist, &keyfunc, &reverse)) {
+            Py_DECREF(tmpargs);
+            return NULL;
+        }
+        Py_DECREF(tmpargs);
+    }
+
+    if (keyfunc == Py_None) {
+        keyfunc = NULL;
+    }
+    Py_XINCREF(keyfunc);
+
+    assert(PyTuple_CheckExact(args));
+    num_iters = PyTuple_GET_SIZE(args);
+
+    if (num_iters == 0) {
+        mo = (mergeobject *)type->tp_alloc(type, 0);
+        if (mo == NULL) {
+            return NULL;
+        }
+        mo->iterators = NULL;
+        mo->num_iters = 0;
+        mo->tree = NULL;
+        mo->keyfunc = NULL;
+        mo->reverse = 0;
+        mo->status = 2;
+        return (PyObject *) mo;
+    }
+
+    iterators = PyMem_Calloc(num_iters, sizeof(PyObject *));
+    if (iterators == NULL) {
+        goto error;
+    }
+
+    /* Store the tree as a list with n-1 internal nodes and n leaves.
+       If a key is being used, store keys next to original items. */;
+    tree = PyMem_Calloc(num_iters - 1, sizeof(merge_node));
+    if (tree == NULL) {
+        goto error;
+    }
+
+    first_sentinel = PyObject_New(PyObject, &PyBaseObject_Type);
+    if (first_sentinel == NULL) {
+        goto error;
+    }
+
+    last_sentinel = PyObject_New(PyObject, &PyBaseObject_Type);
+    if (last_sentinel == NULL) {
+        goto error;
+    }
+
+    /* Now make the shifted list of iterators. */
+    for (i = 0; i < num_iters; i++) {
+        PyObject *iterable = PyTuple_GET_ITEM(args, i);
+        PyObject *iterator = PyObject_GetIter(iterable);
+        if (iterator == NULL) {
+            goto error;
+        }
+        iterators[i] = iterator;
+    }
+
+    for (i = 0; i < num_iters - 1; i++) {
+        tree[i].source_index = -1;
+        tree[i].value = first_sentinel;
+        Py_INCREF(first_sentinel);
+        if (keyfunc) {
+            tree[i].key = first_sentinel;
+            Py_INCREF(first_sentinel);
+        }
+        else {
+            tree[i].key = NULL;
+        }
+    }
+
+    mo = (mergeobject *)type->tp_alloc(type, 0);
+    if (mo == NULL) {
+        goto error;
+    }
+    mo->next_index = -1;
+    mo->iterators = iterators;
+    mo->num_iters = num_iters;
+    mo->tree = tree;
+    mo->keyfunc = keyfunc;
+    mo->reverse = reverse;
+    mo->status = 0;
+    mo->first_sentinel = first_sentinel;
+    mo->last_sentinel = last_sentinel;
+
+    return (PyObject *) mo;
+
+error:
+    if (iterators) {
+        for (i = 0; i < num_iters; i++) {
+            Py_CLEAR(iterators[i]);
+        }
+        PyMem_Free(iterators);
+    }
+    if (tree) {
+        for (i = 0; i < num_iters - 1; i ++) {
+            Py_CLEAR(tree[i].key);
+            Py_CLEAR(tree[i].value);
+        }
+        PyMem_Free(tree);
+    }
+    Py_XDECREF(keyfunc);
+    Py_XDECREF(first_sentinel);
+    Py_XDECREF(last_sentinel);
+    return NULL;
+}
+
+static int
+merge_clear(mergeobject *mo)
+{
+    Py_ssize_t n = mo->num_iters;
+    Py_ssize_t i;
+
+    if (mo->tree) {
+        for (i = 0; i < n - 1; i++) {
+            Py_CLEAR(mo->tree[i].key);
+            Py_CLEAR(mo->tree[i].value);
+        }
+    }
+    PyMem_Free(mo->tree);
+    mo->tree = NULL;
+
+    if (mo->iterators) {
+        for (i = 0; i < n; i++) {
+            Py_CLEAR(mo->iterators[i]);
+        }
+    }
+    PyMem_Free(mo->iterators);
+    mo->tree = NULL;
+
+    Py_CLEAR(mo->keyfunc);
+    Py_CLEAR(mo->first_sentinel);
+    Py_CLEAR(mo->last_sentinel);
+    return 0;
+}
+
+static void
+merge_dealloc(mergeobject *mo)
+{
+    PyObject_GC_UnTrack(mo);
+    merge_clear(mo);
+    Py_TYPE(mo)->tp_free(mo);
+}
+
+static PyObject *
+merge_sizeof(mergeobject *mo, void *unused)
+{
+    Py_ssize_t n = mo->num_iters;
+    Py_ssize_t treesize = n - 1;
+    Py_ssize_t res = _PyObject_SIZE(Py_TYPE(mo));
+
+    if (mo->iterators) {
+        res += n * sizeof(PyObject*);
+    }
+    if (mo->tree) {
+        res += treesize * sizeof(merge_node);
+    }
+    return PyLong_FromSsize_t(res);
+}
+
+static int
+merge_traverse(mergeobject *mo, visitproc visit, void *arg)
+{
+    Py_ssize_t n = mo->num_iters;
+    Py_ssize_t i;
+
+    if (mo->tree) {
+        for (i = 0; i < n - 1; i++) {
+            Py_VISIT(mo->tree[i].key);
+            Py_VISIT(mo->tree[i].value);
+        }
+    }
+
+    if (mo->iterators) {
+        for (i = 0; i < n; i++) {
+            Py_VISIT(mo->iterators[i]);
+        }
+    }
+
+    Py_VISIT(mo->keyfunc);
+    Py_VISIT(mo->first_sentinel);
+    Py_VISIT(mo->last_sentinel);
+    return 0;
+}
+
+static PyObject *
+merge_next(mergeobject *mo) {
+    PyObject *result;
+    merge_node *tree = mo->tree;
+    merge_node holding;
+    Py_ssize_t i, n = mo->num_iters;
+
+    switch (mo->status) {
+    case 0:
+        for (i = 1; i < n; i++) {
+            if (replay_games(mo, i, &holding) < 0) {
+                Py_CLEAR(holding.key);
+                Py_CLEAR(holding.value);
+                goto stop;
+            }
+            Py_CLEAR(holding.key);
+            Py_CLEAR(holding.value);
+        }
+        mo->next_index = 0;
+        mo->status = 1;
+    /* Fallthrough */
+    case 1:
+        // printf("tree[0]: ");
+        // reprint(tree[0].value);
+        // printf("\n");
+        if (replay_games(mo, mo->next_index, &holding) < 0) {
+            goto stop;
+        }
+        mo->next_index = holding.source_index;
+        Py_CLEAR(holding.key);
+        result = holding.value;
+        if (result == mo->last_sentinel) {
+            Py_DECREF(result);
+            goto stop;
+        }
+        return holding.value;
+    case 2:
+        return NULL;
+    default:
+        Py_UNREACHABLE();
+    }
+stop:
+    mo->status = 2;
+    return NULL;
+}
+
+
+PyDoc_STRVAR(sizeof_doc, "Returns size in memory, in bytes.");
+
+static PyMethodDef merge_methods[] = {
+    {"__sizeof__", (PyCFunction)merge_sizeof, METH_NOARGS, sizeof_doc},
+    {NULL, NULL}
+};
+
+PyDoc_STRVAR(merge_doc,
+"merge(*iterables, key=None, reverse=False) --> merge object\n\
+\n\
+Merge multiple sorted inputs into a single sorted output.\n\
+\n\
+Similar to sorted(itertools.chain(*iterables)) but returns a generator,\n\
+does not pull the data into memory all at once, and assumes that each of\n\
+the input streams is already sorted (smallest to largest).\n\
+\n\
+>>> list(merge([1,3,5,7], [0,2,4,8], [5,10,15,20], [], [25]))\n\
+[0, 1, 2, 3, 4, 5, 5, 7, 8, 10, 15, 20, 25]\n\
+\n\
+If *key* is not None, applies a key function to each element to determine\n\
+its sort order.\n\
+\n\
+>>> list(merge(['dog', 'horse'], ['cat', 'fish', 'kangaroo'], key=len))\n\
+['dog', 'cat', 'fish', 'horse', 'kangaroo']");
+
+static PyTypeObject merge_type = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "heapq.merge",
+    .tp_basicsize = sizeof(mergeobject),
+    .tp_dealloc = (destructor)merge_dealloc,
+    .tp_getattro = PyObject_GenericGetAttr,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_doc = merge_doc,
+    .tp_traverse = (traverseproc)merge_traverse,
+    .tp_clear = (inquiry)merge_clear,
+    .tp_iter = PyObject_SelfIter,
+    .tp_iternext = (iternextfunc)merge_next,
+    .tp_methods = merge_methods,
+    .tp_new = merge_new,
+    .tp_free = PyObject_GC_Del,
+};
+
 static PyMethodDef heapq_methods[] = {
     _HEAPQ_HEAPPUSH_METHODDEF
     _HEAPQ_HEAPPUSHPOP_METHODDEF
@@ -699,6 +1207,9 @@ heapq_exec(PyObject *m)
     PyObject *about = PyUnicode_FromString(__about__);
     if (PyModule_AddObject(m, "__about__", about) < 0) {
         Py_DECREF(about);
+        return -1;
+    }
+    if (PyModule_AddType(m, &merge_type) < 0) {
         return -1;
     }
     return 0;
